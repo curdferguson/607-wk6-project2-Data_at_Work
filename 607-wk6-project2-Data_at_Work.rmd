@@ -50,7 +50,8 @@ We can, however, specify an *offset* parameter to return data from later in the 
 ```{r compile_jobsdata, echo=TRUE}
 
 ## set a seed for the random number generators
-set.seed(324550)  
+seed <- 162752
+set.seed(seed)  
 
 ## generate a sample of page numbers of length 10 
 pagenums <- sample(1:46295, 10, replace=FALSE)
@@ -136,10 +137,10 @@ skills_data <- bind_rows(lapply(skills_raw, function(i) {
     job = i$job_title,
     skill_name = as_vector(lapply(i$skills, function(j) {
       j$skill_name
-      })),
+      })) %>% as.factor(),
     skill_type = as_vector(lapply(i$skills, function(j) {
       j$skill_type
-      })),
+      })) %>% as.factor(),
     importance = as.vector(lapply(i$skills, function(j) {
       j$importance
       }), mode = "numeric"),
@@ -167,16 +168,22 @@ Now, let's determine which skills are most broadly relevant among our sample, an
 
 ```{r top_skills}
 
-top20skills <- skills_data %>% 
+top10skills <- skills_data %>% 
   group_by(skill_name) %>% 
   summarize(
-    skill_name = unique(skill_name),
-    skill_type = unique(skill_type),
+    name = unique(skill_name),
+    type = unique(skill_type),
     median_importance = median(importance)) %>%
-  slice_max(n=20, order_by= median_importance)
+  slice_max(n=10, order_by= median_importance)
 
+ggplot(top10skills, aes(name, median_importance, fill=type)) +
+  geom_col() +
+  coord_flip() +
+  scale_x_discrete(limits=rev(top10skills$name[!is.na(top10skills$median_importance)])) + labs(title="Top 10 Job Skills",
+       subtitle = paste("From a sample of 10 randomly selected occupations, seed =", seed),
+       y = "Median Importance to Occupation", 
+       x ="")
 
-
-datatable(top20skills)  
+datatable(top10skills)
 
 ```
