@@ -1,0 +1,182 @@
+---
+title: "607-wk6-project2-Data_at_Work"
+author: "Tyler Frankenberg"
+date: "3/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(httr)
+library(DT)
+
+```
+
+## Introduction
+
+### Week 5 Discussion Inspiration 
+
+In week 5 discussion posts, one classmate proposed looking at data scraped from LinkedIn, while another proposed wrangling data obtained in .JSON format through an API call.  While I initially hoped to get relevant data on recruiters' and job seekers' advertised skills from LinkedIn's API, I found that in the API's current state all of this data has been reserved for those users with enterprise-level talent management accounts, and requires custom development through a LinkedIn business manager.  
+
+### Data at Work & The Open Skills Project  
+
+In 2017-2018, the University of Chicago's Center for Data Science & Public Policy, supported by the Alfred P. Sloan foundation, compiled a large dataset called the *Open Skills Project*, as part of a larger initiative called Data at Work.  The stated purpose was, according to the project, **"providing a dynamic, up-to-date, locally-relevant, and normalized taxonomy of skills and jobs that builds on and expands on the Department of Labor’s O*NET data resources. It’s aim is to improve our understanding of the labor market and reduce frictions in the workforce data ecosystem by enabling a more granular common language of skills among industry, academia, government, and nonprofit organizations."**
+
+I found this a fascinating alternative resource for experimenting with APIs and exploring a data classification system for occupational skillsets that could be of use to my project 3 team, so I decided to explore...
+
+### How is the Open Skills Project Data structured?
+
+The data includes over 450,000 *occupations* identified by their Bureau of Labor Statistics O\*NET SOC ID as well as a *unique alphanumeric identifier* specific to the project.  This second project-specific identifier is important to us because it forms the basis of our API calls.
+
+Each *occupation* is linked to related occupations from the database, as well as to a set of *119 skills* that are standardized across all occupations.
+
+For each occupation, skills are assigned a rating for *importance* - how important the skill is to this occupation versus other skills - and for *level* - how proficient a practitioner ought to be at this skill versus others. The ratings are derived from periodic surveys conducted by the Bureau of Labor Statistics.
+
+
+## Data Import and Wrangling with the Open Skills Project APIs
+
+The objective of this project is to use two of the project's API calls (available at <http://api.dataatwork.org/v1/spec/>) to compile and compare the top-rated skills for a random sampling of 10 occupations.
+
+The first API call, to */jobs*, is peculiar because it limits subsets of the data obtained in any call to 500 observations.  This prevents us from accessing the full list of 462,952 occupations at once.  
+
+We can, however, specify an *offset* parameter to return data from later in the collection to ensure we are not always pulling from the first n entries in the dataset. With a little random integer generation, this can also function as a stratification mechanism that keeps us from drawing two alphabetically consecutive occupations from the dataset, which we expect will provide some limited protection against redundancy in the results (eg. we won't expect to pull both "data administrator" and "data systems analyst") in the same sample.
+
+
+### 1. A Stratified Random Sample of 10 Occupations from the Open Skills Project  
+
+```{r compile_jobsdata, echo=TRUE}
+
+## set a seed for the random number generators
+set.seed(324550)  
+
+## generate a sample of page numbers of length 10 
+pagenums <- sample(1:46295, 10, replace=FALSE)
+
+## for the /jobs API call, create a unique URL for each of 10 calls to /jobs we will run.
+## our 10 randomly-selected page numbers will be given as the "offset" argument, and we'll also give a "limit=10" argument to return 10 occupations with each call to the API.
+pagenum_urls <- lapply(pagenums, function(a) {
+  paste("http://api.dataatwork.org/v1/jobs?offset=", a,"&limit=10", sep="")
+})
+
+## using methods from the package "httr", call the /jobs API once for each of our urls, and compile the results of all 10 into a list
+jobs_data <- lapply(pagenum_urls, function(b){
+  GET(url = b) %>% content()
+})
+
+```
+
+
+The result of our code above is a list of 10 lists of randomly selected page results, each of which is in turn a list of 10 occupations defined by 4 variables.  For example, let's look at the first occupation in our first randomly sampled stratum of 10:
+
+
+```{r glimpse_jobsdata}
+
+glimpse(head(jobs_data[[1]], 1))
+
+```
+
+The "uuid" field is what is important to us here - it is the unique identifier by which we can look up more detailed information through related API calls.  
+  
+Since we're looking up the skillsets of 10 random occupations, let's complete our sampling by taking one uuid from each set of 10 page results:
+
+```{r get_jobIDs}
+## obtain a random integer between 1 and 10, which will define the position from which we take our uuids accross all 10 sets of page results
+d <- as.numeric(sample(1:10, 1))
+
+## get those uuids into a list we can work with in our next API call
+jobs_sample <- c(lapply(jobs_data, function(c) {
+    c[[d]]$uuid
+}))
+
+glimpse(jobs_sample)
+
+```
+
+### 2. Compiling Skills Data for our sample of occupations 
+
+We're now going to iteratively pass the uuids of our 10 randomly selected occupations into another API from Open Skills Project, which will bring name, type, and values for importance and level for each of 119 skills.
+
+Like with jobs_data above, our skills_raw data is going to be a list of lists of lists.
+
+```{r get_skills}
+
+## create urls from our 10 uuids
+skills_urls <- lapply(jobs_sample, function(x) {
+  paste("http://api.dataatwork.org/v1/jobs/", x, "/related_skills", sep="")
+})
+
+## call /jobs/{id}/related_skills for each of our uuids
+skills_raw <- lapply(skills_urls, function(y){
+  GET(url = y) %>% content()
+})
+
+```
+
+This results in a very large list.  Let's just take a quick look at a couple of the skills for our first sampled profession so we know what we're working with:
+
+```{r glimpse_skills}
+
+glimpse(head(skills_raw[[1]]$skills, 3))
+
+```
+There's a lot of information here we can use toward some interesting analysis.  In the next section we'll whittle our large list of lists of lists down to a manageable dataframe we can work with.
+
+
+## Compile Skills Data
+
+In this crucial step, we're going to obtain just the relevant information on each of our 10 randomly chosen jobs and their rating of on each of the 119 skills, and return it in a long tibble.
+
+```{r compile_final}
+
+skills_data <- bind_rows(lapply(skills_raw, function(i) {
+  tibble(
+    job = i$job_title,
+    skill_name = as_vector(lapply(i$skills, function(j) {
+      j$skill_name
+      })),
+    skill_type = as_vector(lapply(i$skills, function(j) {
+      j$skill_type
+      })),
+    importance = as.vector(lapply(i$skills, function(j) {
+      j$importance
+      }), mode = "numeric"),
+    level = as.vector(lapply(i$skills, function(j) {
+      j$level
+      }), mode = "numeric"))
+  }))
+
+```
+
+
+### Analysis: What Skill is most broadly relevant accross our 10 occupations?
+
+Let's start by examining what occupations have been selected at random:
+
+```{r reveal_jobs}
+
+unique(skills_data$job)
+
+```
+
+We have quite a lot of diversity in our sample!
+
+Now, let's determine which skills are most broadly relevant among our sample, and graph the results.
+
+```{r top_skills}
+
+top20skills <- skills_data %>% 
+  group_by(skill_name) %>% 
+  summarize(
+    skill_name = unique(skill_name),
+    skill_type = unique(skill_type),
+    median_importance = median(importance)) %>%
+  slice_max(n=20, order_by= median_importance)
+
+
+
+datatable(top20skills)  
+
+```
